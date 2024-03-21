@@ -1,8 +1,11 @@
 use std::io;
+use std::sync::Arc;
 
 use figment::value::magic::{Either, RelativePathBuf};
 use serde::{Deserialize, Serialize};
 use indexmap::IndexSet;
+
+use crate::tls::Result;
 
 /// TLS configuration: certificate chain, key, and ciphersuites.
 ///
@@ -426,8 +429,54 @@ impl TlsConfig {
         self.mutual.as_ref()
     }
 
-    pub fn validate(&self) -> Result<(), crate::tls::Error> {
-        self.server_config().map(|_| ())
+    /// Try to convert `self` into a [rustls] [`ServerConfig`].
+    ///
+    /// [`ServerConfig`]: rustls::server::ServerConfig
+    pub fn to_server_config(&self) -> Result<rustls::server::ServerConfig> {
+        use rustls::server::{ServerSessionMemoryCache, ServerConfig, WebPkiClientVerifier};
+        use crate::tls::util::{load_cert_chain, load_key, load_ca_certs};
+
+        let provider = rustls::crypto::CryptoProvider {
+            cipher_suites: self.ciphers().map(|c| c.into()).collect(),
+            ..rustls::crypto::ring::default_provider()
+        };
+
+        #[cfg(feature = "mtls")]
+        let verifier = match self.mutual {
+            Some(ref mtls) => {
+                let ca_certs = load_ca_certs(&mut mtls.ca_certs_reader()?)?;
+                let verifier = WebPkiClientVerifier::builder(Arc::new(ca_certs));
+                match mtls.mandatory {
+                    true => verifier.build()?,
+                    false => verifier.allow_unauthenticated().build()?,
+                }
+            },
+            None => WebPkiClientVerifier::no_client_auth(),
+        };
+
+        #[cfg(not(feature = "mtls"))]
+        let verifier = WebPkiClientVerifier::no_client_auth();
+
+        let key = load_key(&mut self.key_reader()?)?;
+        let cert_chain = load_cert_chain(&mut self.certs_reader()?)?;
+        let mut tls_config = ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()?
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(cert_chain, key)?;
+
+        tls_config.ignore_client_order = self.prefer_server_cipher_order;
+        tls_config.session_storage = ServerSessionMemoryCache::new(1024);
+        tls_config.ticketer = rustls::crypto::ring::Ticketer::new()?;
+        tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        if cfg!(feature = "http2") {
+            tls_config.alpn_protocols.insert(0, b"h2".to_vec());
+        }
+
+        Ok(tls_config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.to_server_config().map(|_| ())
     }
 }
 
