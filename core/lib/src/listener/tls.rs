@@ -1,7 +1,6 @@
 use std::io;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::LazyConfigAcceptor;
 use rustls::server::{Acceptor, ServerConfig};
