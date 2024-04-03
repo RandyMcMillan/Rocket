@@ -1,5 +1,5 @@
 [package]
-name = "config"
+name = "gnostr-config"
 version = "0.0.0"
 workspace = "../"
 edition = "2021"
